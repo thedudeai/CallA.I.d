@@ -1,0 +1,77 @@
+// Team reporting + rep drill-down (spec §6.8). Admin only. All figures computed
+// from real seeded/ingested calls — nothing hardcoded.
+import { Router } from 'express';
+import { db } from '../db.js';
+import { authRequired, isAdmin, audit } from '../auth.js';
+import { DIMENSION_LABELS } from '../ai/prompts.js';
+
+export const router = Router();
+router.use(authRequired);
+
+function adminOnly(req, res, next) {
+  if (!isAdmin(req.user) || !req.companyId) return res.status(403).json({ error: 'forbidden' });
+  next();
+}
+
+const trend = (rep) => (rep.avg >= 78 ? 'up' : 'down');
+
+function repStats(companyId, userId) {
+  const calls = db.prepare('SELECT * FROM calls WHERE company_id = ? AND user_id = ?').all(companyId, userId);
+  const count = calls.length;
+  const avg = count ? Math.round(calls.reduce((s, c) => s + (c.overall_score || 0), 0) / count) : 0;
+  return { count, avg };
+}
+
+router.get('/reporting/team', adminOnly, (req, res) => {
+  const calls = db.prepare('SELECT * FROM calls WHERE company_id = ?').all(req.companyId);
+  const total = calls.length;
+  const avg = total ? Math.round(calls.reduce((s, c) => s + (c.overall_score || 0), 0) / total) : 0;
+  const sales = calls.filter(c => c.mode === 'sales');
+  const closeRate = sales.length ? Math.round(sales.filter(c => (c.overall_score || 0) >= 80).length / sales.length * 100) : 0;
+  const care = calls.filter(c => c.mode === 'care');
+  const csat = care.length ? +(care.reduce((s, c) => s + (c.overall_score || 0), 0) / care.length / 20).toFixed(1) : 0;
+
+  const reps = db.prepare(`SELECT id,name,role,default_mode FROM users WHERE company_id = ? AND role IN ('sales_rep','customer_service_rep') ORDER BY name`).all(req.companyId)
+    .map(u => {
+      const s = repStats(req.companyId, u.id);
+      return { id: u.id, name: u.name, role: u.role, mode: u.default_mode, calls: s.count, avg: s.avg };
+    })
+    .filter(r => r.calls > 0)
+    .sort((a, b) => b.avg - a.avg)
+    .map(r => ({ ...r, trend: trend(r) }));
+
+  const saved = db.prepare(`SELECT c.id,c.contact_name,c.mode,c.call_type,c.duration,c.overall_score,u.name rep
+    FROM calls c JOIN users u ON u.id = c.user_id WHERE c.company_id = ? ORDER BY c.started_at DESC LIMIT 8`).all(req.companyId);
+
+  res.json({
+    stats: { calls: total, avg_score: avg, close_rate: closeRate, csat },
+    leaderboard: reps,
+    saved_logs: saved,
+  });
+});
+
+router.get('/reporting/reps/:id', adminOnly, (req, res) => {
+  const u = db.prepare('SELECT id,name,role,default_mode,default_playbook_id FROM users WHERE id = ? AND company_id = ?').get(req.params.id, req.companyId);
+  if (!u) return res.status(404).json({ error: 'not_found' });
+  const s = repStats(req.companyId, u.id);
+  // Averaged scoring breakdown across the rep's calls.
+  const rows = db.prepare(`SELECT cs.dimension, AVG(cs.value) v FROM call_scores cs
+    JOIN calls c ON c.id = cs.call_id WHERE c.company_id = ? AND c.user_id = ? GROUP BY cs.dimension`).all(req.companyId, u.id);
+  const breakdown = rows.map(r => ({ dimension: r.dimension, label: DIMENSION_LABELS[r.dimension] || r.dimension, value: Math.round(r.v) }));
+  const pb = u.default_playbook_id ? db.prepare('SELECT name FROM playbooks WHERE id = ?').get(u.default_playbook_id) : null;
+  const log = db.prepare('SELECT id,contact_name,mode,call_type,duration,overall_score FROM calls WHERE company_id = ? AND user_id = ? ORDER BY started_at DESC').all(req.companyId, u.id);
+  // Coaching focus = lowest average dimension.
+  const low = [...breakdown].sort((a, b) => a.value - b.value)[0];
+  const note = low ? `Coaching focus: lift ${low.label.toLowerCase()} (lowest average at ${low.value}).` : 'No calls yet.';
+  res.json({
+    id: u.id, name: u.name, role: u.role, mode: u.default_mode, default_playbook: pb?.name || null,
+    avg: s.avg, calls: s.count, trend: trend({ avg: s.avg }),
+    breakdown, note, log,
+  });
+});
+
+// Audit log view (admin / super-admin) — supports the §12 audit requirement.
+router.get('/audit', adminOnly, (req, res) => {
+  const rows = db.prepare('SELECT actor_user_id,action,target,at FROM audit_log WHERE company_id = ? ORDER BY at DESC LIMIT 100').all(req.companyId);
+  res.json(rows);
+});

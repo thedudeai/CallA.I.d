@@ -1,0 +1,18 @@
+{
+  "name": "callaid",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "CallA.I.d — multi-tenant live-call assist platform (backend + web)",
+  "engines": {
+    "node": "22.x"
+  },
+  "scripts": {
+    "setup": "npm --prefix server install && npm --prefix web install && npm run seed",
+    "seed": "npm --prefix server run seed",
+    "dev:server": "npm --prefix server run dev",
+    "dev:web": "npm --prefix web run dev",
+    "build": "npm --prefix web run build",
+    "start": "npm --prefix server run start"
+  }
+}
