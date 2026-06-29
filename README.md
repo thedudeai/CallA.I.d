@@ -62,6 +62,33 @@ npm run dev:web        # Vite dev server on :5173 (proxies /api and /calls/live)
 
 ---
 
+## Deploy (container host)
+
+CallA.I.d is **stateful** — one long-running process serves the API, the live
+WebSocket, and the built SPA, backed by a local SQLite file. Deploy it to any
+container host (Render / Railway / Fly / a VM), not a serverless platform.
+
+```bash
+docker build -t callaid .
+docker run -p 4000:4000 \
+  -e CALLAID_JWT_SECRET=change-me -e CALLAID_SECRET=change-me \
+  -v callaid-data:/app/server/data \
+  callaid
+# → http://localhost:4000
+```
+
+The image builds the SPA, installs the server (with native SQLite), seeds an
+idempotent demo database, and serves everything on `PORT` (default `4000`,
+honoured by Render/Railway/Fly). Mount a volume at `/app/server/data` to persist
+the database across restarts; otherwise it reseeds on boot.
+
+**Render:** a [`render.yaml`](./render.yaml) blueprint is included — point Render
+at this repo (New → Blueprint) for a one-click deploy with generated secrets and
+the `/api/health` health check.
+
+> Vercel's serverless model can't run the persistent process or the WebSocket and
+> has an ephemeral/read-only filesystem, so it is intentionally **not** a target.
+
 ## Architecture
 
 ```

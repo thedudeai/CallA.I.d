@@ -1,0 +1,20 @@
+# Render blueprint — one-click deploy of CallA.I.d from this repo.
+# (Render → New → Blueprint → point at this repo.) Works on the free plan; data
+# is reseeded on each restart. Add a paid disk (below, commented) to persist it.
+services:
+  - type: web
+    name: callaid
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /api/health
+    envVars:
+      - key: CALLAID_JWT_SECRET
+        generateValue: true
+      - key: CALLAID_SECRET
+        generateValue: true
+    # Persist the SQLite database across deploys/restarts (requires a paid plan):
+    # disk:
+    #   name: callaid-data
+    #   mountPath: /app/server/data
+    #   sizeGB: 1
