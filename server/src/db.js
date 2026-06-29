@@ -1,0 +1,226 @@
+// SQLite connection + schema. Every tenant row carries company_id; the repo
+// layer (tenant.js) scopes every query by it. SQLite is used for a self-contained
+// build; the schema maps 1:1 to the Postgres model in the spec (§9) so swapping
+// in Postgres + RLS later is mechanical.
+import Database from 'better-sqlite3';
+import { mkdirSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const DATA_DIR = join(__dirname, '..', 'data');
+mkdirSync(DATA_DIR, { recursive: true });
+
+export const DB_PATH = process.env.CALLAID_DB || join(DATA_DIR, 'callaid.db');
+
+export const db = new Database(DB_PATH);
+db.pragma('journal_mode = WAL');
+db.pragma('foreign_keys = ON');
+
+export function migrate() {
+  db.exec(`
+  CREATE TABLE IF NOT EXISTS companies (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    plan TEXT NOT NULL DEFAULT 'Starter',
+    status TEXT NOT NULL DEFAULT 'active',     -- active | trial | suspended
+    theme TEXT NOT NULL DEFAULT 'aurora',
+    seats INTEGER NOT NULL DEFAULT 5,
+    created_at TEXT NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS users (
+    id TEXT PRIMARY KEY,
+    company_id TEXT,                            -- null only for platform super_admin
+    name TEXT NOT NULL,
+    email TEXT NOT NULL UNIQUE,
+    password_hash TEXT NOT NULL,
+    role TEXT NOT NULL,                         -- super_admin | company_admin | sales_rep | customer_service_rep
+    default_mode TEXT NOT NULL DEFAULT 'care',  -- care | sales
+    default_playbook_id TEXT,
+    access_level TEXT NOT NULL DEFAULT 'self',  -- self | full
+    status TEXT NOT NULL DEFAULT 'active',
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (company_id) REFERENCES companies(id) ON DELETE CASCADE
+  );
+
+  CREATE TABLE IF NOT EXISTS api_keys (
+    id TEXT PRIMARY KEY,
+    company_id TEXT NOT NULL,
+    provider TEXT NOT NULL DEFAULT 'anthropic',
+    encrypted_key TEXT NOT NULL,               -- reversibly obfuscated for this build; KMS in prod
+    last4 TEXT,
+    status TEXT NOT NULL DEFAULT 'active',
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (company_id) REFERENCES companies(id) ON DELETE CASCADE
+  );
+
+  CREATE TABLE IF NOT EXISTS integrations (
+    id TEXT PRIMARY KEY,
+    company_id TEXT NOT NULL,
+    type TEXT NOT NULL,                         -- twilio | ringcentral | aircall | genesys | webrtc
+    config TEXT NOT NULL DEFAULT '{}',
+    status TEXT NOT NULL DEFAULT 'disconnected',
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (company_id) REFERENCES companies(id) ON DELETE CASCADE
+  );
+
+  CREATE TABLE IF NOT EXISTS kb_documents (
+    id TEXT PRIMARY KEY,
+    company_id TEXT NOT NULL,
+    filename TEXT NOT NULL,
+    type TEXT NOT NULL DEFAULT 'doc',
+    status TEXT NOT NULL DEFAULT 'indexing',    -- indexing | indexed | analyzed
+    storage_ref TEXT,
+    size_bytes INTEGER DEFAULT 0,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (company_id) REFERENCES companies(id) ON DELETE CASCADE
+  );
+
+  CREATE TABLE IF NOT EXISTS kb_chunks (
+    id TEXT PRIMARY KEY,
+    document_id TEXT NOT NULL,
+    company_id TEXT NOT NULL,
+    seq INTEGER NOT NULL,
+    text TEXT NOT NULL,
+    embedding TEXT,                             -- JSON array (lexical fallback vector for this build)
+    FOREIGN KEY (document_id) REFERENCES kb_documents(id) ON DELETE CASCADE,
+    FOREIGN KEY (company_id) REFERENCES companies(id) ON DELETE CASCADE
+  );
+
+  CREATE TABLE IF NOT EXISTS playbooks (
+    id TEXT PRIMARY KEY,
+    company_id TEXT NOT NULL,
+    mode TEXT NOT NULL,                         -- care | sales
+    name TEXT NOT NULL,
+    emoji TEXT DEFAULT '📘',
+    description TEXT DEFAULT '',
+    stages TEXT NOT NULL DEFAULT '[]',          -- JSON string[]
+    discovery_bank TEXT NOT NULL DEFAULT '[]',  -- JSON string[]
+    rubric_weights TEXT NOT NULL DEFAULT '{}',  -- JSON { dimension: weight }
+    tactics TEXT NOT NULL DEFAULT '[]',         -- JSON string[] tags
+    source TEXT NOT NULL DEFAULT 'custom',      -- default | ai-proposed | custom
+    status TEXT NOT NULL DEFAULT 'active',
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (company_id) REFERENCES companies(id) ON DELETE CASCADE
+  );
+
+  CREATE TABLE IF NOT EXISTS playbook_proposals (
+    id TEXT PRIMARY KEY,
+    company_id TEXT NOT NULL,
+    source_document_id TEXT,
+    source_filename TEXT,
+    draft TEXT NOT NULL,                        -- JSON of a draft playbook
+    status TEXT NOT NULL DEFAULT 'pending',     -- pending | accepted | dismissed
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (company_id) REFERENCES companies(id) ON DELETE CASCADE
+  );
+
+  CREATE TABLE IF NOT EXISTS calls (
+    id TEXT PRIMARY KEY,
+    company_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,                      -- rep
+    contact_name TEXT,
+    contact_number TEXT,
+    mode TEXT NOT NULL,
+    playbook_id TEXT,
+    call_type TEXT,                             -- cold | inbound | follow-up | returning | new
+    touch_number INTEGER DEFAULT 1,
+    direction TEXT DEFAULT 'inbound',
+    status TEXT NOT NULL DEFAULT 'completed',   -- live | completed
+    started_at TEXT NOT NULL,
+    duration INTEGER DEFAULT 0,                 -- seconds
+    recording_ref TEXT,
+    transcript TEXT,                            -- JSON [{speaker,text,t}]
+    overall_score INTEGER,
+    gap INTEGER,
+    verdict TEXT,
+    summary TEXT,
+    FOREIGN KEY (company_id) REFERENCES companies(id) ON DELETE CASCADE,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+  );
+
+  CREATE TABLE IF NOT EXISTS call_scores (
+    id TEXT PRIMARY KEY,
+    call_id TEXT NOT NULL,
+    company_id TEXT NOT NULL,
+    dimension TEXT NOT NULL,
+    value INTEGER NOT NULL,
+    FOREIGN KEY (call_id) REFERENCES calls(id) ON DELETE CASCADE
+  );
+
+  CREATE TABLE IF NOT EXISTS call_moments (
+    id TEXT PRIMARY KEY,
+    call_id TEXT NOT NULL,
+    company_id TEXT NOT NULL,
+    ts TEXT NOT NULL,                           -- mm:ss
+    severity TEXT NOT NULL,                     -- good | warn | bad
+    label TEXT NOT NULL,
+    detail TEXT,
+    FOREIGN KEY (call_id) REFERENCES calls(id) ON DELETE CASCADE
+  );
+
+  CREATE TABLE IF NOT EXISTS coaching (
+    call_id TEXT PRIMARY KEY,
+    company_id TEXT NOT NULL,
+    tip TEXT NOT NULL,
+    FOREIGN KEY (call_id) REFERENCES calls(id) ON DELETE CASCADE
+  );
+
+  CREATE TABLE IF NOT EXISTS tasks (
+    id TEXT PRIMARY KEY,
+    company_id TEXT NOT NULL,
+    call_id TEXT,
+    owner_user_id TEXT NOT NULL,
+    text TEXT NOT NULL,
+    kind TEXT NOT NULL DEFAULT 'follow-up',     -- follow-up | note
+    source TEXT NOT NULL DEFAULT 'ai',          -- ai | manual
+    done INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (company_id) REFERENCES companies(id) ON DELETE CASCADE
+  );
+
+  CREATE TABLE IF NOT EXISTS calendar_events (
+    id TEXT PRIMARY KEY,
+    company_id TEXT NOT NULL,
+    call_id TEXT,
+    owner_user_id TEXT,
+    title TEXT NOT NULL,
+    starts_at TEXT NOT NULL,
+    ends_at TEXT,
+    status TEXT NOT NULL DEFAULT 'scheduled',
+    external_ref TEXT,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (company_id) REFERENCES companies(id) ON DELETE CASCADE
+  );
+
+  CREATE TABLE IF NOT EXISTS suggestions_log (
+    id TEXT PRIMARY KEY,
+    company_id TEXT NOT NULL,
+    call_id TEXT,
+    ts TEXT NOT NULL,
+    stage TEXT,
+    suggested_line TEXT,
+    used INTEGER DEFAULT 0
+  );
+
+  CREATE TABLE IF NOT EXISTS audit_log (
+    id TEXT PRIMARY KEY,
+    actor_user_id TEXT,
+    company_id TEXT,                            -- nullable for platform actions
+    action TEXT NOT NULL,
+    target TEXT,
+    detail TEXT,
+    at TEXT NOT NULL
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_users_company ON users(company_id);
+  CREATE INDEX IF NOT EXISTS idx_calls_company ON calls(company_id);
+  CREATE INDEX IF NOT EXISTS idx_calls_user ON calls(user_id);
+  CREATE INDEX IF NOT EXISTS idx_tasks_company ON tasks(company_id);
+  CREATE INDEX IF NOT EXISTS idx_playbooks_company ON playbooks(company_id);
+  CREATE INDEX IF NOT EXISTS idx_chunks_company ON kb_chunks(company_id);
+  `);
+}
+
+migrate();
