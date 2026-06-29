@@ -8,13 +8,19 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const DATA_DIR = join(__dirname, '..', 'data');
-mkdirSync(DATA_DIR, { recursive: true });
 
-export const DB_PATH = process.env.CALLAID_DB || join(DATA_DIR, 'callaid.db');
+// On serverless platforms (Vercel/Lambda) the bundle filesystem is read-only;
+// only /tmp is writable (and ephemeral per instance), so the DB lives there and
+// is seeded on cold start. Elsewhere it's a persistent file under server/data.
+const ON_SERVERLESS = !!(process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME);
+export const DB_PATH = process.env.CALLAID_DB || (ON_SERVERLESS ? '/tmp/callaid.db' : join(__dirname, '..', 'data', 'callaid.db'));
+export const EPHEMERAL_DB = ON_SERVERLESS && !process.env.CALLAID_DB;
+mkdirSync(dirname(DB_PATH), { recursive: true });
 
 export const db = new Database(DB_PATH);
-db.pragma('journal_mode = WAL');
+// WAL needs a writable dir + shared memory; on serverless /tmp use the simpler
+// rollback journal, which is fine for a single-instance ephemeral demo DB.
+db.pragma(`journal_mode = ${ON_SERVERLESS ? 'DELETE' : 'WAL'}`);
 db.pragma('foreign_keys = ON');
 
 export function migrate() {

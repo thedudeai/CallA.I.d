@@ -55,6 +55,9 @@ export function Live() {
   const wsRef = useRef<WebSocket | null>(null);
   const playRef = useRef<number | null>(null);
   const timerRef = useRef<number | null>(null);
+  const transcriptRef = useRef<{ speaker: string; text: string }[]>([]);
+  const httpRef = useRef(false);          // true once we fall back to per-turn HTTP (no WS)
+  const elapsedRef = useRef(0);
 
   const scenario = SCENARIOS[mode];
   const modePlaybooks = playbooks.filter(p => p.mode === mode);
@@ -70,32 +73,61 @@ export function Live() {
   function teardown() {
     if (playRef.current) clearInterval(playRef.current);
     if (timerRef.current) clearInterval(timerRef.current);
-    wsRef.current?.close();
+    try { wsRef.current?.close(); } catch { /* ignore */ }
+  }
+
+  function startTimer() {
+    elapsedRef.current = 0;
+    timerRef.current = window.setInterval(() => { elapsedRef.current += 1; setElapsed(e => e + 1); }, 1000);
   }
 
   function start() {
     teardown();
-    setTranscript([]); setG(null); setListen(false); setElapsed(0); setStatus('connecting');
+    setTranscript([]); transcriptRef.current = []; setG(null); setListen(false); setElapsed(0);
+    httpRef.current = false; setStatus('connecting');
     const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-    const ws = new WebSocket(`${proto}://${location.host}/calls/live?token=${getToken()}`);
+    let ready = false;
+    let ws: WebSocket;
+    try { ws = new WebSocket(`${proto}://${location.host}/calls/live?token=${getToken()}`); }
+    catch { startHttp(); return; }
     wsRef.current = ws;
+    // If the WS can't establish quickly (e.g. serverless platforms), fall back to HTTP.
+    const fallback = window.setTimeout(() => { if (!ready) startHttp(); }, 1800);
     ws.onopen = () => {
       ws.send(JSON.stringify({ type: 'start', mode, playbook_id: playbookId, contact_name: scenario.contact, contact_number: scenario.number, call_type: scenario.callType, touch_number: mode === 'care' ? 3 : 1 }));
-      setStatus('live');
-      timerRef.current = window.setInterval(() => setElapsed(e => e + 1), 1000);
     };
     ws.onmessage = (ev) => {
       const m = JSON.parse(ev.data);
-      if (m.type === 'guidance') { setG(m); if (m.listen) setListen(true); }
+      if (m.type === 'ready') { ready = true; clearTimeout(fallback); setStatus('live'); startTimer(); }
+      else if (m.type === 'guidance') { setG(m); if (m.listen) setListen(true); }
       else if (m.type === 'analysis') { setStatus('ended'); if (m.call_id) setTimeout(() => nav('/feedback'), 900); }
     };
-    ws.onclose = () => { if (timerRef.current) clearInterval(timerRef.current); };
-    ws.onerror = () => setStatus('idle');
+    ws.onclose = () => { if (timerRef.current) clearInterval(timerRef.current); if (!ready && !httpRef.current) { clearTimeout(fallback); startHttp(); } };
+    ws.onerror = () => { /* close handler drives the fallback */ };
+  }
+
+  // HTTP transport: no persistent connection — each turn posts the running
+  // transcript and gets the same guidance shape back. Used wherever WS isn't held.
+  function startHttp() {
+    if (httpRef.current) return;
+    httpRef.current = true;
+    try { wsRef.current?.close(); } catch { /* ignore */ }
+    setStatus('live'); startTimer();
+    requestHttpGuidance(mode);
+  }
+
+  async function requestHttpGuidance(modeArg: Mode) {
+    try {
+      const g = await api.liveSuggest({ transcript: transcriptRef.current, mode: modeArg, playbook_id: playbookId, call_type: scenario.callType, touch_number: modeArg === 'care' ? 3 : 1 });
+      setG(g); if (g.listen) setListen(true);
+    } catch { /* keep last guidance */ }
   }
 
   function sendTurn(sp: string, text: string) {
-    setTranscript(t => [...t, { speaker: sp, text }]);
-    wsRef.current?.send(JSON.stringify({ type: 'turn', speaker: sp, text }));
+    const next = [...transcriptRef.current, { speaker: sp, text }];
+    transcriptRef.current = next; setTranscript(next);
+    if (httpRef.current) requestHttpGuidance(mode);
+    else wsRef.current?.send(JSON.stringify({ type: 'turn', speaker: sp, text }));
   }
 
   function playScenario() {
@@ -109,20 +141,32 @@ export function Live() {
     }, 2600);
   }
 
-  function end() {
+  async function end() {
     if (playRef.current) clearInterval(playRef.current);
-    wsRef.current?.send(JSON.stringify({ type: 'end' }));
+    if (timerRef.current) clearInterval(timerRef.current);
     setStatus('ended');
+    if (httpRef.current) {
+      if (!transcriptRef.current.length) return;
+      try {
+        await api.analyze({ contact_name: scenario.contact, contact_number: scenario.number, mode, playbook_id: playbookId, call_type: scenario.callType, touch_number: mode === 'care' ? 3 : 1, duration: elapsedRef.current, transcript: transcriptRef.current });
+        setTimeout(() => nav('/feedback'), 700);
+      } catch { /* stay on screen */ }
+    } else {
+      wsRef.current?.send(JSON.stringify({ type: 'end' }));
+    }
   }
 
   function toggleListen() {
     const v = !listen; setListen(v);
-    wsRef.current?.send(JSON.stringify({ type: 'listen', on: v }));
+    if (!httpRef.current) wsRef.current?.send(JSON.stringify({ type: 'listen', on: v }));
   }
 
   function switchMode(m: Mode) {
     setMode(m);
-    if (status === 'live') wsRef.current?.send(JSON.stringify({ type: 'mode', mode: m }));
+    if (status === 'live') {
+      if (httpRef.current) requestHttpGuidance(m);
+      else wsRef.current?.send(JSON.stringify({ type: 'mode', mode: m }));
+    }
   }
 
   const stages = g?.stage.all || (mode === 'care' ? ['Listen', 'Diagnose', 'Resolve', 'Confirm'] : ['Discovery', 'Problem', 'Solution', 'Close']);

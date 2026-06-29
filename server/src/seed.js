@@ -1,12 +1,11 @@
 // Seed data mirroring callaid_ui.html so the app is fully populated on first run.
 // Northwind Audio is the demo tenant; Brightline & Harbor populate the super-admin
 // table. Reporting numbers are computed from real seeded calls, not hardcoded.
+import { fileURLToPath } from 'node:url';
 import { db, migrate } from './db.js';
 import { id, now } from './util.js';
 import { hashPassword } from './auth.js';
 import { indexDocument } from './ai/rag.js';
-
-const RESET = process.argv.includes('--reset');
 
 function reset() {
   const tables = ['audit_log', 'suggestions_log', 'calendar_events', 'tasks', 'coaching',
@@ -73,10 +72,10 @@ function daysAhead(d, h = 11) {
   const dt = new Date(); dt.setDate(dt.getDate() + d); dt.setHours(h, 0, 0, 0); return dt.toISOString();
 }
 
-function run() {
+export function seed({ reset: doReset = false, quiet = false } = {}) {
   migrate();
-  if (alreadySeeded() && !RESET) { console.log('Already seeded (use --reset to wipe). Skipping.'); return; }
-  if (RESET) reset();
+  if (alreadySeeded() && !doReset) { if (!quiet) console.log('Already seeded (use --reset to wipe). Skipping.'); return false; }
+  if (doReset) reset();
 
   // ---- Platform owner (super admin, no company) ----
   user(null, 'Dani Lerner', 'dani@callaid.io', 'super_admin', 'care', 'full');
@@ -290,9 +289,20 @@ function run() {
   const harbor = company('Harbor & Co', 'Starter', 'trial', 3, 'sunset');
   user(harbor, 'Otis Vance', 'otis@harbor.example', 'company_admin', 'care', 'full');
 
-  console.log('Seed complete.');
-  console.log('Login with any of: dani@callaid.io (super admin), avery@northwind.example (company admin),');
-  console.log('priya@ / theo@ / june@ / adam@northwind.example (reps) — password: demo1234');
+  if (!quiet) {
+    console.log('Seed complete.');
+    console.log('Login with any of: dani@callaid.io (super admin), avery@northwind.example (company admin),');
+    console.log('priya@ / theo@ / june@ / adam@northwind.example (reps) — password: demo1234');
+  }
+  return true;
 }
 
-run();
+// Seed only when the DB is empty — used on serverless cold start.
+export function seedIfEmpty() {
+  migrate();
+  if (!alreadySeeded()) seed({ quiet: true });
+}
+
+// Run as a CLI: `node src/seed.js [--reset]`.
+const isMain = process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1];
+if (isMain) seed({ reset: process.argv.includes('--reset') });

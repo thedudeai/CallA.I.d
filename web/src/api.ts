@@ -96,6 +96,7 @@ export const api = {
   call: (id: string) => request<CallDetail>('GET', `/calls/${id}`),
   feedbackLatest: () => request<CallDetail | null>('GET', '/feedback/latest'),
   analyze: (b: any) => request<CallDetail & { engine: string }>('POST', '/calls/analyze', b),
+  liveSuggest: (b: any) => request<any>('POST', '/calls/live/suggest', b),
   tasks: () => request<Task[]>('GET', '/tasks'),
   toggleTask: (id: string, done: boolean) => request<any>('PATCH', `/tasks/${id}`, { done }),
   // reporting

@@ -3,7 +3,7 @@
 import { Router } from 'express';
 import { db } from '../db.js';
 import { authRequired, isAdmin, audit } from '../auth.js';
-import { hydratePlaybook, analyzeCall } from '../ai/index.js';
+import { hydratePlaybook, analyzeCall, liveSuggest } from '../ai/index.js';
 import { id, now, json } from '../util.js';
 
 export const router = Router();
@@ -103,6 +103,22 @@ router.post('/calls/analyze', async (req, res) => {
 
   audit(req.user.id, req.companyId, 'analyze_call', cid, { engine: result.engine });
   res.status(201).json({ engine: result.engine, ...callDetail(cid, req.companyId) });
+});
+
+// POST /calls/live/suggest — the HTTP equivalent of one WebSocket guidance frame.
+// Serverless platforms can't hold a WS open, so the live HUD posts the running
+// transcript here per turn and gets the same guidance shape back.
+router.post('/calls/live/suggest', async (req, res) => {
+  if (!req.companyId) return res.status(400).json({ error: 'company_context_required' });
+  const b = req.body || {};
+  const transcript = Array.isArray(b.transcript) ? b.transcript : [];
+  const mode = b.mode || req.user.default_mode || 'care';
+  const playbookRow = b.playbook_id ? db.prepare('SELECT * FROM playbooks WHERE id = ? AND company_id = ?').get(b.playbook_id, req.companyId) : null;
+  const g = await liveSuggest(req.companyId, {
+    transcript, mode, playbook: hydratePlaybook(playbookRow),
+    callType: b.call_type, touchNumber: b.touch_number,
+  });
+  res.json(g);
 });
 
 // ---- Tasks ----
