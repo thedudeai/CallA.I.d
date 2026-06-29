@@ -8,7 +8,7 @@ import { WebSocketServer } from 'ws';
 import jwt from 'jsonwebtoken';
 import { db } from '../db.js';
 import { hydratePlaybook, liveSuggest, analyzeCall } from '../ai/index.js';
-import { enqueueSync } from '../integrations/zoho/index.js';
+import { syncOnComplete } from '../integrations/zoho/index.js';
 import { id, now } from '../util.js';
 
 const JWT_SECRET = process.env.CALLAID_JWT_SECRET || 'callaid-dev-jwt-secret';
@@ -114,7 +114,7 @@ export function attachLiveGateway(server) {
       if (result.coaching) db.prepare('INSERT INTO coaching (call_id,company_id,tip) VALUES (?,?,?)').run(cid, user.company_id, result.coaching);
       for (const t of result.tasks) db.prepare('INSERT INTO tasks (id,company_id,call_id,owner_user_id,text,kind,source,done,created_at) VALUES (?,?,?,?,?,?,?,?,?)').run(id('tsk'), user.company_id, cid, user.id, t.text, t.kind, 'ai', 0, now());
       if (result.follow) db.prepare('INSERT INTO calendar_events (id,company_id,call_id,owner_user_id,title,starts_at,status,created_at) VALUES (?,?,?,?,?,?,?,?)').run(id('cal'), user.company_id, cid, user.id, result.follow.title, result.follow.starts_at, 'scheduled', now());
-      enqueueSync(user.company_id, cid); // mirror into Zoho if connected (async, idempotent)
+      await syncOnComplete(user.company_id, cid); // mirror into Zoho if connected (idempotent)
       send({ type: 'analysis', call_id: cid, engine: result.engine });
     }
 

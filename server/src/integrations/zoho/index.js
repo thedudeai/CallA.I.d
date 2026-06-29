@@ -8,9 +8,19 @@ import { getConfig, saveConfig, isConnected, remove, clearCachedToken } from './
 import { exchangeCode, revoke } from './oauth.js';
 import { fetchIdentities, fetchDeskOrg } from './adapters.js';
 import { mockOrg } from './mock.js';
+import { EPHEMERAL_DB } from '../../db.js';
 import { enqueueSync, syncCall } from './sync.js';
 
 export { enqueueSync, syncCall };
+
+// Post-call hook. On a long-lived host, enqueue and return immediately (never
+// block the HUD/analysis). On serverless (EPHEMERAL_DB) there's no background
+// worker and the function freezes after responding, so run the sync inline.
+export async function syncOnComplete(companyId, callId) {
+  if (!isConnected(companyId)) return;
+  if (EPHEMERAL_DB) { try { await syncCall(companyId, callId); } catch { /* surfaced via call status + manual re-sync */ } }
+  else enqueueSync(companyId, callId);
+}
 
 // Short-lived OAuth state → companyId (single-instance; fine for admin-initiated
 // connect). state also guards against CSRF on the callback.
