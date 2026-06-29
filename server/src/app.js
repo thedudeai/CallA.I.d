@@ -16,6 +16,7 @@ import { router as playbookRoutes } from './routes/playbooks.js';
 import { router as callRoutes } from './routes/calls.js';
 import { router as reportingRoutes } from './routes/reporting.js';
 import { router as webhookRoutes } from './routes/webhooks.js';
+import { router as zohoRoutes } from './routes/zoho.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -36,6 +37,7 @@ api.use(playbookRoutes);
 api.use(callRoutes);
 api.use(reportingRoutes);
 api.use(webhookRoutes);
+api.use(zohoRoutes);
 app.use('/api', api);
 
 // Serve the built frontend when present (single-origin local/container deploy).

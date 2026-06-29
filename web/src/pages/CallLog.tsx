@@ -67,6 +67,7 @@ export function CallLog() {
                   ))}
                 </div>
               </div>
+              <ZohoBlock detail={detail} onSynced={(z) => setDetail({ ...detail, zoho: z })} />
               <div className="dblock">
                 <div className="dt">Scheduled follow-up</div>
                 {detail.follow ? (
@@ -82,6 +83,44 @@ export function CallLog() {
         </div>
       </div>
     </section>
+  );
+}
+
+function ZohoBlock({ detail, onSynced }: { detail: CallDetail; onSynced: (z: any) => void }) {
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState<string | null>(null);
+  const z = detail.zoho || { status: null, record_id: null, product: null };
+
+  async function sync() {
+    setBusy(true); setMsg(null);
+    try {
+      const r = await api.zohoSync(detail.id);
+      onSynced({ status: 'synced', record_id: r.record_id || null, product: r.product || null });
+    } catch (e: any) {
+      setMsg(e?.code === 'not_connected' ? 'Connect Zoho in Settings first.' : 'Sync failed — try again.');
+    } finally { setBusy(false); }
+  }
+
+  const product = z.product === 'crm' ? 'CRM' : z.product === 'desk' ? 'Desk' : (detail.mode === 'sales' ? 'CRM' : 'Desk');
+  return (
+    <div className="dblock">
+      <div className="dt">Zoho {product} <span className="chip">{detail.mode === 'sales' ? 'sales → CRM' : 'care → Desk'}</span></div>
+      {z.status === 'synced' ? (
+        <div className="calchip" style={{ borderColor: 'color-mix(in srgb,var(--care) 35%,transparent)' }}>
+          <div className="cal"><div className="m">ZOHO</div><div className="d">✓</div></div>
+          <div className="ci2"><b>Recorded in Zoho {product}</b><small>record {z.record_id} · contact, {detail.mode === 'sales' ? 'call, tasks & event' : 'ticket, summary & tasks'} pushed</small></div>
+          <span className="added">✓ synced</span>
+        </div>
+      ) : z.status === 'skipped' ? (
+        <p>Skipped — the tenant's Zoho org doesn't have this product enabled, or the rep isn't mapped.</p>
+      ) : (
+        <div>
+          <p style={{ marginBottom: 10 }}>{z.status === 'failed' ? 'Last sync failed.' : 'Not yet pushed to Zoho.'}</p>
+          <button className="btn primary" style={{ padding: '7px 14px' }} onClick={sync} disabled={busy}>{busy ? '…' : z.status === 'failed' ? 'Retry sync' : 'Sync to Zoho'}</button>
+          {msg && <span className="hint" style={{ marginLeft: 10 }}>{msg}</span>}
+        </div>
+      )}
+    </div>
   );
 }
 

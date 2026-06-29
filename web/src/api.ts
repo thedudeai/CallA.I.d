@@ -30,6 +30,7 @@ export interface CallDetail {
   transcript: { speaker: string; text: string; t?: string }[];
   scores: Score[]; moments: Moment[]; coaching: string | null; tasks: Task[];
   follow: { id: string; title: string; starts_at: string; status: string } | null;
+  zoho?: { status: string | null; record_id: string | null; product: string | null };
 }
 
 let _token: string | null = localStorage.getItem('callaid_token');
@@ -102,4 +103,14 @@ export const api = {
   // reporting
   team: () => request<any>('GET', '/reporting/team'),
   rep: (id: string) => request<any>('GET', `/reporting/reps/${id}`),
+  // zoho
+  zohoStatus: () => request<any>('GET', '/zoho/status'),
+  zohoConnect: () => request<any>('POST', '/zoho/connect'),
+  zohoConnectSandbox: () => request<any>('POST', '/zoho/connect/sandbox'),
+  zohoDisconnect: () => request<any>('POST', '/zoho/disconnect'),
+  zohoMappings: () => request<any>('GET', '/zoho/mappings'),
+  zohoSetMapping: (userId: string, b: { crm?: string; desk?: string }) => request<any>('PATCH', `/zoho/mappings/${userId}`, b),
+  zohoDefaults: (b: { crm?: string; desk?: string }) => request<any>('PUT', '/zoho/defaults', b),
+  zohoRecords: () => request<any>('GET', '/zoho/records'),
+  zohoSync: (callId: string) => request<any>('POST', `/zoho/sync/${callId}`),
 };

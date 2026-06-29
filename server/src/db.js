@@ -229,4 +229,56 @@ export function migrate() {
   `);
 }
 
+// Zoho integration schema additions (companion spec). Idempotent: adds columns
+// to existing tables only if missing, plus the sync-queue and (sandbox) mirror
+// tables. Kept separate so the core schema stays readable.
+function addColumn(table, col, def) {
+  const cols = db.prepare(`PRAGMA table_info(${table})`).all();
+  if (!cols.some(c => c.name === col)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${def}`);
+}
+
+export function migrateZoho() {
+  addColumn('users', 'zoho_crm_user_id', 'TEXT');
+  addColumn('users', 'zoho_desk_agent_id', 'TEXT');
+  addColumn('calls', 'zoho_sync_status', "TEXT DEFAULT 'pending'"); // pending|synced|failed|skipped
+  addColumn('calls', 'zoho_record_id', 'TEXT');
+  addColumn('calls', 'zoho_product', 'TEXT');                       // crm|desk
+  addColumn('tasks', 'zoho_task_id', 'TEXT');
+  addColumn('tasks', 'zoho_sync_status', 'TEXT');
+  addColumn('calendar_events', 'zoho_event_id', 'TEXT');
+
+  db.exec(`
+  CREATE TABLE IF NOT EXISTS zoho_sync_jobs (
+    id TEXT PRIMARY KEY,
+    company_id TEXT NOT NULL,
+    call_id TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'queued',   -- queued | running | done | failed | skipped
+    attempts INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
+
+  -- Sandbox/demo mirror: the records that WOULD be (or were) written to Zoho, so
+  -- the integration is fully demoable without a live Zoho org. Real connections
+  -- also log here for an in-app audit of what was pushed.
+  CREATE TABLE IF NOT EXISTS zoho_mirror (
+    id TEXT PRIMARY KEY,
+    company_id TEXT NOT NULL,
+    call_id TEXT,
+    product TEXT NOT NULL,                    -- crm | desk
+    kind TEXT NOT NULL,                       -- contact | call | ticket | task | event | comment
+    zoho_id TEXT NOT NULL,
+    owner TEXT,
+    payload TEXT NOT NULL,                    -- JSON of the record as sent
+    sandbox INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_zoho_jobs_company ON zoho_sync_jobs(company_id);
+  CREATE INDEX IF NOT EXISTS idx_zoho_mirror_company ON zoho_mirror(company_id);
+  CREATE INDEX IF NOT EXISTS idx_zoho_mirror_call ON zoho_mirror(call_id);
+  `);
+}
+
 migrate();
+migrateZoho();

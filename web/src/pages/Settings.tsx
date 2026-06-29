@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../auth';
 import { api, User } from '../api';
 import { Section, Spinner, initials } from '../ui';
+import { ZohoSettings } from './ZohoSettings';
 
 const THEMES = [
   ['aurora', 'conic-gradient(from 200deg,#36E5C8,#A78BFA)'],
@@ -108,6 +109,9 @@ export function Settings() {
           <div className="hint">Connect your provider, or pipe live audio in via SIP / API.</div>
         </div>
       </div>
+
+      <Section>CRM &amp; helpdesk · Zoho</Section>
+      <ZohoSettings />
 
       <Section>Appearance &amp; seats</Section>
       <div className="twocol">

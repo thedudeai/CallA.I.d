@@ -4,6 +4,7 @@ import { Router } from 'express';
 import { db } from '../db.js';
 import { authRequired, isAdmin, audit } from '../auth.js';
 import { hydratePlaybook, analyzeCall, liveSuggest } from '../ai/index.js';
+import { enqueueSync } from '../integrations/zoho/index.js';
 import { id, now, json } from '../util.js';
 
 export const router = Router();
@@ -28,6 +29,7 @@ export function callDetail(callId, companyId) {
     started_at: c.started_at, duration: c.duration, overall_score: c.overall_score, gap: c.gap,
     verdict: c.verdict, summary: c.summary, transcript: json(c.transcript, []),
     scores, moments, coaching: coaching?.tip || null, tasks, follow: follow || null,
+    zoho: { status: c.zoho_sync_status || null, record_id: c.zoho_record_id || null, product: c.zoho_product || null },
   };
 }
 
@@ -102,6 +104,7 @@ router.post('/calls/analyze', async (req, res) => {
       .run(id('cal'), req.companyId, cid, req.user.id, result.follow.title, result.follow.starts_at, 'scheduled', now());
 
   audit(req.user.id, req.companyId, 'analyze_call', cid, { engine: result.engine });
+  enqueueSync(req.companyId, cid); // mirror into Zoho (sales→CRM, care→Desk) if connected; async, idempotent
   res.status(201).json({ engine: result.engine, ...callDetail(cid, req.companyId) });
 });
 
