@@ -1,5 +1,6 @@
 // Small shared helpers: ids, time, reversible key obfuscation, JSON safety.
 import { randomBytes, createCipheriv, createDecipheriv, scryptSync } from 'node:crypto';
+import { APP_SECRET } from './secrets.js';
 
 export function id(prefix = '') {
   return (prefix ? prefix + '_' : '') + randomBytes(9).toString('hex');
@@ -16,8 +17,7 @@ export function json(v, fallback) {
 // Reversible obfuscation for stored tenant API keys. In production this is a
 // KMS/secrets-manager envelope; here we use AES-256-GCM with a server secret so
 // keys are never stored in plaintext and never logged.
-const SECRET = process.env.CALLAID_SECRET || 'callaid-dev-secret-change-me';
-const KEYBUF = scryptSync(SECRET, 'callaid-key-salt', 32);
+const KEYBUF = scryptSync(APP_SECRET, 'callaid-key-salt', 32);
 
 export function encrypt(plain) {
   if (!plain) return '';

@@ -1,7 +1,7 @@
 // Auth + session context. Holds the logged-in user, their company, the live
 // mode (care/sales), and — for a super admin — the "opened" tenant.
 import { createContext, useContext, useEffect, useState, ReactNode } from 'react';
-import { api, setToken, getToken, setActiveCompany, getActiveCompany, User, Company, Mode } from './api';
+import { api, setToken, getToken, setActiveCompany, getActiveCompany, setUnauthorizedHandler, User, Company, Mode } from './api';
 
 interface AuthState {
   user: User | null;
@@ -36,6 +36,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setLoading(false);
   }
   useEffect(() => { refresh(); }, []);
+
+  // On any 401 from an authenticated request, drop to the logged-out state so the
+  // app renders Login instead of leaving a page spinning on a dead session.
+  useEffect(() => {
+    setUnauthorizedHandler(() => { setUser(null); setCompany(null); });
+    return () => setUnauthorizedHandler(null);
+  }, []);
 
   // Reflect mode onto <html data-mode> so the whole theme retints.
   useEffect(() => { document.documentElement.dataset.mode = mode; }, [mode]);

@@ -9,9 +9,9 @@ import jwt from 'jsonwebtoken';
 import { db } from '../db.js';
 import { hydratePlaybook, liveSuggest, analyzeCall } from '../ai/index.js';
 import { syncOnComplete } from '../integrations/zoho/index.js';
+import { persistAnalyzedCall } from '../routes/calls.js';
 import { id, now } from '../util.js';
-
-const JWT_SECRET = process.env.CALLAID_JWT_SECRET || 'callaid-dev-jwt-secret';
+import { JWT_SECRET } from '../secrets.js';
 
 function authFromUrl(reqUrl) {
   try {
@@ -97,25 +97,28 @@ export function attachLiveGateway(server) {
 
     async function finalize() {
       if (!session.transcript.length) { send({ type: 'analysis', empty: true }); return; }
-      const durationSec = Math.round((Date.now() - session.started) / 1000);
-      const result = await analyzeCall(user.company_id, {
-        transcript: session.transcript, mode: session.mode, playbook: session.playbook,
-        contactName: session.contact_name, durationSec,
-      });
-      const cid = id('call');
-      db.prepare(`INSERT INTO calls (id,company_id,user_id,contact_name,contact_number,mode,playbook_id,call_type,touch_number,direction,status,started_at,duration,transcript,overall_score,gap,verdict,summary)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
-        cid, user.company_id, user.id, session.contact_name, session.contact_number, session.mode,
-        session.playbook?.id || null, session.call_type, session.touch_number, session.direction,
-        'completed', new Date(session.started).toISOString(), durationSec,
-        JSON.stringify(session.transcript), result.overall, result.gap ?? 0, result.verdict, result.summary);
-      for (const s of result.scores) db.prepare('INSERT INTO call_scores (id,call_id,company_id,dimension,value) VALUES (?,?,?,?,?)').run(id('sc'), cid, user.company_id, s.dimension, s.value);
-      for (const m of result.moments) db.prepare('INSERT INTO call_moments (id,call_id,company_id,ts,severity,label,detail) VALUES (?,?,?,?,?,?,?)').run(id('mo'), cid, user.company_id, m.ts, m.severity, m.label, m.detail);
-      if (result.coaching) db.prepare('INSERT INTO coaching (call_id,company_id,tip) VALUES (?,?,?)').run(cid, user.company_id, result.coaching);
-      for (const t of result.tasks) db.prepare('INSERT INTO tasks (id,company_id,call_id,owner_user_id,text,kind,source,done,created_at) VALUES (?,?,?,?,?,?,?,?,?)').run(id('tsk'), user.company_id, cid, user.id, t.text, t.kind, 'ai', 0, now());
-      if (result.follow) db.prepare('INSERT INTO calendar_events (id,company_id,call_id,owner_user_id,title,starts_at,status,created_at) VALUES (?,?,?,?,?,?,?,?)').run(id('cal'), user.company_id, cid, user.id, result.follow.title, result.follow.starts_at, 'scheduled', now());
-      await syncOnComplete(user.company_id, cid); // mirror into Zoho if connected (idempotent)
-      send({ type: 'analysis', call_id: cid, engine: result.engine });
+      try {
+        const durationSec = Math.round((Date.now() - session.started) / 1000);
+        const result = await analyzeCall(user.company_id, {
+          transcript: session.transcript, mode: session.mode, playbook: session.playbook,
+          contactName: session.contact_name, durationSec,
+        });
+        const cid = id('call');
+        // Same atomic persistence path as the HTTP /calls/analyze route.
+        persistAnalyzedCall({
+          cid, companyId: user.company_id, userId: user.id, contactName: session.contact_name,
+          contactNumber: session.contact_number, mode: session.mode,
+          playbookId: session.playbook?.id || null, callType: session.call_type,
+          touchNumber: session.touch_number, direction: session.direction,
+          startedAt: new Date(session.started).toISOString(), duration: durationSec,
+          transcript: session.transcript, result,
+        });
+        await syncOnComplete(user.company_id, cid); // mirror into Zoho if connected (idempotent)
+        send({ type: 'analysis', call_id: cid, engine: result.engine });
+      } catch (e) {
+        console.error('[gateway] finalize failed:', e?.message);
+        send({ type: 'error', message: 'analysis_failed' });
+      }
     }
 
     ws.on('close', () => { if (session.pending) clearTimeout(session.pending); });

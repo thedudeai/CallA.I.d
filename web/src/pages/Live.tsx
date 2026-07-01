@@ -55,6 +55,7 @@ export function Live() {
   const wsRef = useRef<WebSocket | null>(null);
   const playRef = useRef<number | null>(null);
   const timerRef = useRef<number | null>(null);
+  const fallbackRef = useRef<number | null>(null);   // WS→HTTP fallback timer
   const transcriptRef = useRef<{ speaker: string; text: string }[]>([]);
   const httpRef = useRef(false);          // true once we fall back to per-turn HTTP (no WS)
   const elapsedRef = useRef(0);
@@ -71,8 +72,9 @@ export function Live() {
   useEffect(() => () => teardown(), []);
 
   function teardown() {
-    if (playRef.current) clearInterval(playRef.current);
-    if (timerRef.current) clearInterval(timerRef.current);
+    if (playRef.current) { clearInterval(playRef.current); playRef.current = null; }
+    if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null; }
+    if (fallbackRef.current) { clearTimeout(fallbackRef.current); fallbackRef.current = null; }
     try { wsRef.current?.close(); } catch { /* ignore */ }
   }
 
@@ -91,18 +93,20 @@ export function Live() {
     try { ws = new WebSocket(`${proto}://${location.host}/calls/live?token=${getToken()}`); }
     catch { startHttp(); return; }
     wsRef.current = ws;
-    // If the WS can't establish quickly (e.g. serverless platforms), fall back to HTTP.
-    const fallback = window.setTimeout(() => { if (!ready) startHttp(); }, 1800);
+    // If the WS can't establish quickly (e.g. serverless platforms), fall back to
+    // HTTP. Stored in a ref so teardown() (incl. unmount) can cancel it — otherwise
+    // navigating away within 1.8s fires startHttp() on an unmounted component.
+    fallbackRef.current = window.setTimeout(() => { if (!ready) startHttp(); }, 1800);
     ws.onopen = () => {
       ws.send(JSON.stringify({ type: 'start', mode, playbook_id: playbookId, contact_name: scenario.contact, contact_number: scenario.number, call_type: scenario.callType, touch_number: mode === 'care' ? 3 : 1 }));
     };
     ws.onmessage = (ev) => {
       const m = JSON.parse(ev.data);
-      if (m.type === 'ready') { ready = true; clearTimeout(fallback); setStatus('live'); startTimer(); }
+      if (m.type === 'ready') { ready = true; if (fallbackRef.current) clearTimeout(fallbackRef.current); setStatus('live'); startTimer(); }
       else if (m.type === 'guidance') { setG(m); if (m.listen) setListen(true); }
       else if (m.type === 'analysis') { setStatus('ended'); if (m.call_id) setTimeout(() => nav('/feedback'), 900); }
     };
-    ws.onclose = () => { if (timerRef.current) clearInterval(timerRef.current); if (!ready && !httpRef.current) { clearTimeout(fallback); startHttp(); } };
+    ws.onclose = () => { if (timerRef.current) clearInterval(timerRef.current); if (!ready && !httpRef.current) { if (fallbackRef.current) clearTimeout(fallbackRef.current); startHttp(); } };
     ws.onerror = () => { /* close handler drives the fallback */ };
   }
 
@@ -132,10 +136,10 @@ export function Live() {
 
   function playScenario() {
     if (status !== 'live') return;
+    if (playRef.current) return; // already playing — don't start a second loop
     let i = 0;
-    if (playRef.current) clearInterval(playRef.current);
     playRef.current = window.setInterval(() => {
-      if (i >= scenario.turns.length) { clearInterval(playRef.current!); return; }
+      if (i >= scenario.turns.length) { clearInterval(playRef.current!); playRef.current = null; return; }
       const turn = scenario.turns[i++];
       sendTurn(turn.speaker, turn.text);
     }, 2600);

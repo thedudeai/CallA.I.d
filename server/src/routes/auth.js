@@ -3,10 +3,14 @@ import { Router } from 'express';
 import { db } from '../db.js';
 import { verifyPassword, signToken, authRequired, audit } from '../auth.js';
 import { json } from '../util.js';
+import { rateLimit } from '../middleware/rateLimit.js';
 
 export const router = Router();
 
-router.post('/auth/login', (req, res) => {
+// Strict per-IP limit on credential submission to blunt brute force / stuffing.
+const loginLimiter = rateLimit({ windowMs: 15 * 60_000, max: 10, bucket: 'login' });
+
+router.post('/auth/login', loginLimiter, (req, res) => {
   const { email, password } = req.body || {};
   if (!email || !password) return res.status(400).json({ error: 'email_password_required' });
   const user = db.prepare('SELECT * FROM users WHERE email = ? AND status = ?').get(String(email).toLowerCase().trim(), 'active');

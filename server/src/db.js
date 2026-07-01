@@ -22,6 +22,9 @@ export const db = new Database(DB_PATH);
 // rollback journal, which is fine for a single-instance ephemeral demo DB.
 db.pragma(`journal_mode = ${ON_SERVERLESS ? 'DELETE' : 'WAL'}`);
 db.pragma('foreign_keys = ON');
+// Wait briefly for a lock instead of throwing SQLITE_BUSY immediately if any
+// second connection/thread ever contends for a write.
+db.pragma('busy_timeout = 5000');
 
 export function migrate() {
   db.exec(`
@@ -226,6 +229,16 @@ export function migrate() {
   CREATE INDEX IF NOT EXISTS idx_tasks_company ON tasks(company_id);
   CREATE INDEX IF NOT EXISTS idx_playbooks_company ON playbooks(company_id);
   CREATE INDEX IF NOT EXISTS idx_chunks_company ON kb_chunks(company_id);
+  -- Composite/covering indexes matching the hot access patterns: the reporting
+  -- and call-list queries filter by (company_id[,user_id]) and sort by started_at,
+  -- and the child tables are looked up by call_id on every detail/report view.
+  CREATE INDEX IF NOT EXISTS idx_calls_company_started ON calls(company_id, started_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_calls_company_user_started ON calls(company_id, user_id, started_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_call_scores_call ON call_scores(call_id);
+  CREATE INDEX IF NOT EXISTS idx_call_moments_call ON call_moments(call_id);
+  CREATE INDEX IF NOT EXISTS idx_tasks_call ON tasks(call_id);
+  CREATE INDEX IF NOT EXISTS idx_tasks_owner ON tasks(owner_user_id);
+  CREATE INDEX IF NOT EXISTS idx_calendar_events_call ON calendar_events(call_id);
   `);
 }
 

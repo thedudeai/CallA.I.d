@@ -59,6 +59,24 @@ export function dcFromAccountsServer(server = '') {
   return found ? found[0] : 'us';
 }
 
+// SSRF guard. `api_domain` in the OAuth token response is attacker-influenceable
+// (a spoofed accounts-server can return an arbitrary value), and we later attach a
+// live bearer token to every request built from it — so it must be validated
+// against known Zoho API hosts before we persist or use it. Accept only https
+// URLs whose host is a Zoho APIs domain (exact DC host, or a subdomain of one).
+const ZOHO_API_HOST_SUFFIXES = [
+  'zohoapis.com', 'zohoapis.eu', 'zohoapis.in', 'zohoapis.com.au',
+  'zohoapis.jp', 'zohoapis.ca', 'zohoapis.sa', 'zohoapis.com.cn',
+];
+export function isAllowedCrmDomain(value) {
+  if (!value) return false;
+  let u;
+  try { u = new URL(value); } catch { return false; }
+  if (u.protocol !== 'https:') return false;
+  const host = u.hostname.toLowerCase();
+  return ZOHO_API_HOST_SUFFIXES.some(s => host === s || host === `www.${s}` || host.endsWith(`.${s}`));
+}
+
 export function authUrl(state) {
   const p = new URLSearchParams({
     response_type: 'code',

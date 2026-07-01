@@ -8,6 +8,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { EPHEMERAL_DB } from './db.js';
 import { seedIfEmpty } from './seed.js';
+import { rateLimit } from './middleware/rateLimit.js';
 
 import { router as authRoutes } from './routes/auth.js';
 import { router as adminRoutes } from './routes/admin.js';
@@ -24,20 +25,55 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 if (EPHEMERAL_DB) { try { seedIfEmpty(); } catch (e) { console.error('seed-on-cold-start failed', e?.message); } }
 
 export const app = express();
-app.use(cors());
+
+// Behind a load balancer / platform proxy we need the real client IP for rate
+// limiting and logging. Configurable so it isn't blindly trusted everywhere.
+app.set('trust proxy', process.env.CALLAID_TRUST_PROXY || 'loopback');
+
+// CORS: allow only the configured SPA origin(s). CALLAID_CORS_ORIGINS is a
+// comma-separated allowlist; if unset we fall back to reflecting no cross-origin
+// requests (same-origin only), which is the safe default for the single-origin
+// container deploy. Set it to your SPA origin(s) when the frontend is served
+// from a different host (e.g. a CDN).
+const corsOrigins = (process.env.CALLAID_CORS_ORIGINS || '')
+  .split(',').map(s => s.trim()).filter(Boolean);
+app.use(cors({
+  origin: corsOrigins.length ? corsOrigins : false,
+  credentials: false,
+}));
+
+// Baseline security headers (helmet-equivalent, no extra dependency).
+app.use((req, res, next) => {
+  res.set('X-Content-Type-Options', 'nosniff');
+  res.set('X-Frame-Options', 'DENY');
+  res.set('Referrer-Policy', 'no-referrer');
+  res.set('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+  next();
+});
+
 app.use(express.json({ limit: '2mb' }));
+
+// Global loose limiter as a backstop; auth and AI routes add stricter buckets.
+app.use('/api', rateLimit({ windowMs: 60_000, max: 300, bucket: 'global' }));
 
 app.get('/api/health', (req, res) => res.json({ ok: true, service: 'callaid', time: new Date().toISOString() }));
 
 const api = express.Router();
-api.use(authRoutes);
+// Public / partially-public routers must be mounted BEFORE the routers that apply
+// a pathless `router.use(authRequired)` (admin/settings/playbooks/calls/reporting).
+// A pathless auth middleware in a sub-router mounted at '/' intercepts every
+// request that reaches it, so anything mounted after would 401 even on its public
+// routes — which previously made the Zoho OAuth callback and telephony webhook
+// unreachable. Auth-required routes inside these routers still enforce auth
+// per-route, so ordering them first is safe.
+api.use(authRoutes);      // login is public; logout/me are per-route authed
+api.use(webhookRoutes);   // telephony webhook (signature-verified, no session)
+api.use(zohoRoutes);      // /zoho/callback is public; the rest are per-route authed
 api.use(adminRoutes);
 api.use(settingsRoutes);
 api.use(playbookRoutes);
 api.use(callRoutes);
 api.use(reportingRoutes);
-api.use(webhookRoutes);
-api.use(zohoRoutes);
 app.use('/api', api);
 
 // Serve the built frontend when present (single-origin local/container deploy).
