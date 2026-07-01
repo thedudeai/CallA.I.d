@@ -6,9 +6,41 @@ import { authRequired, isAdmin, audit } from '../auth.js';
 import { hydratePlaybook, analyzeCall, liveSuggest } from '../ai/index.js';
 import { syncOnComplete } from '../integrations/zoho/index.js';
 import { id, now, json } from '../util.js';
+import { rateLimit } from '../middleware/rateLimit.js';
 
 export const router = Router();
 router.use(authRequired);
+
+// Both endpoints below invoke the tenant's Claude key, so an authenticated rep
+// (or a compromised account) could otherwise run up the tenant's AI bill. Cap
+// per-IP throughput; live/suggest is more frequent (per turn) so gets a bit more.
+const analyzeLimiter = rateLimit({ windowMs: 60_000, max: 20, bucket: 'ai-analyze' });
+const liveLimiter = rateLimit({ windowMs: 60_000, max: 120, bucket: 'ai-live' });
+
+// Single source of truth for persisting a scored call + its children. Wrapped in
+// a synchronous transaction so a failure rolls the whole graph back. Used by both
+// the HTTP /calls/analyze path and the WebSocket gateway's finalize().
+export const persistAnalyzedCall = db.transaction((p) => {
+  const { cid, companyId, userId, contactName, contactNumber, mode, playbookId,
+    callType, touchNumber, direction, startedAt, duration, transcript, result } = p;
+  db.prepare(`INSERT INTO calls (id,company_id,user_id,contact_name,contact_number,mode,playbook_id,call_type,touch_number,direction,status,started_at,duration,transcript,overall_score,gap,verdict,summary)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
+    cid, companyId, userId, contactName, contactNumber, mode, playbookId,
+    callType, touchNumber, direction, 'completed', startedAt, duration,
+    JSON.stringify(transcript), result.overall, result.gap ?? 0, result.verdict, result.summary);
+  for (const s of result.scores)
+    db.prepare('INSERT INTO call_scores (id,call_id,company_id,dimension,value) VALUES (?,?,?,?,?)').run(id('sc'), cid, companyId, s.dimension, s.value);
+  for (const m of result.moments)
+    db.prepare('INSERT INTO call_moments (id,call_id,company_id,ts,severity,label,detail) VALUES (?,?,?,?,?,?,?)').run(id('mo'), cid, companyId, m.ts, m.severity, m.label, m.detail);
+  if (result.coaching) db.prepare('INSERT INTO coaching (call_id,company_id,tip) VALUES (?,?,?)').run(cid, companyId, result.coaching);
+  for (const t of result.tasks)
+    db.prepare('INSERT INTO tasks (id,company_id,call_id,owner_user_id,text,kind,source,done,created_at) VALUES (?,?,?,?,?,?,?,?,?)')
+      .run(id('tsk'), companyId, cid, userId, t.text, t.kind, 'ai', 0, now());
+  if (result.follow)
+    db.prepare('INSERT INTO calendar_events (id,company_id,call_id,owner_user_id,title,starts_at,status,created_at) VALUES (?,?,?,?,?,?,?,?)')
+      .run(id('cal'), companyId, cid, userId, result.follow.title, result.follow.starts_at, 'scheduled', now());
+  return cid;
+});
 
 // Assemble the full detail view for one call.
 export function callDetail(callId, companyId) {
@@ -74,7 +106,7 @@ router.get('/feedback/latest', (req, res) => {
 
 // POST /calls/analyze — ingest a transcript and produce a scored, summarized call
 // with extracted tasks + follow-up (Phase 1: proves the AI loop on recordings).
-router.post('/calls/analyze', async (req, res) => {
+router.post('/calls/analyze', analyzeLimiter, async (req, res) => {
   if (!req.companyId) return res.status(400).json({ error: 'company_context_required' });
   const b = req.body || {};
   const transcript = Array.isArray(b.transcript) ? b.transcript : [];
@@ -86,22 +118,16 @@ router.post('/calls/analyze', async (req, res) => {
   const result = await analyzeCall(req.companyId, { transcript, mode, playbook, contactName, durationSec: b.duration || 0 });
 
   const cid = id('call');
-  db.prepare(`INSERT INTO calls (id,company_id,user_id,contact_name,contact_number,mode,playbook_id,call_type,touch_number,direction,status,started_at,duration,transcript,overall_score,gap,verdict,summary)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
-    cid, req.companyId, req.user.id, contactName, b.contact_number || null, mode, b.playbook_id || null,
-    b.call_type || null, b.touch_number || 1, b.direction || 'inbound', 'completed', now(), b.duration || 0,
-    JSON.stringify(transcript), result.overall, result.gap ?? 0, result.verdict, result.summary);
-  for (const s of result.scores)
-    db.prepare('INSERT INTO call_scores (id,call_id,company_id,dimension,value) VALUES (?,?,?,?,?)').run(id('sc'), cid, req.companyId, s.dimension, s.value);
-  for (const m of result.moments)
-    db.prepare('INSERT INTO call_moments (id,call_id,company_id,ts,severity,label,detail) VALUES (?,?,?,?,?,?,?)').run(id('mo'), cid, req.companyId, m.ts, m.severity, m.label, m.detail);
-  if (result.coaching) db.prepare('INSERT INTO coaching (call_id,company_id,tip) VALUES (?,?,?)').run(cid, req.companyId, result.coaching);
-  for (const t of result.tasks)
-    db.prepare('INSERT INTO tasks (id,company_id,call_id,owner_user_id,text,kind,source,done,created_at) VALUES (?,?,?,?,?,?,?,?,?)')
-      .run(id('tsk'), req.companyId, cid, req.user.id, t.text, t.kind, 'ai', 0, now());
-  if (result.follow)
-    db.prepare('INSERT INTO calendar_events (id,company_id,call_id,owner_user_id,title,starts_at,status,created_at) VALUES (?,?,?,?,?,?,?,?)')
-      .run(id('cal'), req.companyId, cid, req.user.id, result.follow.title, result.follow.starts_at, 'scheduled', now());
+  // Persist the call and all its children atomically — a crash mid-sequence must
+  // not leave a call row with partial scores/moments/tasks that reporting then
+  // aggregates as complete.
+  persistAnalyzedCall({
+    cid, companyId: req.companyId, userId: req.user.id, contactName,
+    contactNumber: b.contact_number || null, mode, playbookId: b.playbook_id || null,
+    callType: b.call_type || null, touchNumber: b.touch_number || 1,
+    direction: b.direction || 'inbound', startedAt: now(), duration: b.duration || 0,
+    transcript, result,
+  });
 
   audit(req.user.id, req.companyId, 'analyze_call', cid, { engine: result.engine });
   await syncOnComplete(req.companyId, cid); // mirror into Zoho (sales→CRM, care→Desk) if connected; idempotent
@@ -111,7 +137,7 @@ router.post('/calls/analyze', async (req, res) => {
 // POST /calls/live/suggest — the HTTP equivalent of one WebSocket guidance frame.
 // Serverless platforms can't hold a WS open, so the live HUD posts the running
 // transcript here per turn and gets the same guidance shape back.
-router.post('/calls/live/suggest', async (req, res) => {
+router.post('/calls/live/suggest', liveLimiter, async (req, res) => {
   if (!req.companyId) return res.status(400).json({ error: 'company_context_required' });
   const b = req.body || {};
   const transcript = Array.isArray(b.transcript) ? b.transcript : [];

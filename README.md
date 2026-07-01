@@ -71,7 +71,10 @@ container host (Render / Railway / Fly / a VM), not a serverless platform.
 ```bash
 docker build -t callaid .
 docker run -p 4000:4000 \
-  -e CALLAID_JWT_SECRET=change-me -e CALLAID_SECRET=change-me \
+  -e NODE_ENV=production \
+  -e CALLAID_JWT_SECRET="$(openssl rand -hex 32)" \
+  -e CALLAID_SECRET="$(openssl rand -hex 32)" \
+  -e CALLAID_CORS_ORIGINS="https://app.example.com" \
   -v callaid-data:/app/server/data \
   callaid
 # → http://localhost:4000
@@ -82,12 +85,24 @@ idempotent demo database, and serves everything on `PORT` (default `4000`,
 honoured by Render/Railway/Fly). Mount a volume at `/app/server/data` to persist
 the database across restarts; otherwise it reseeds on boot.
 
+> **Secrets are mandatory in production.** With `NODE_ENV=production`, the server
+> refuses to start unless `CALLAID_JWT_SECRET` and `CALLAID_SECRET` are set — there
+> are no hardcoded fallbacks. Generate strong random values (`openssl rand -hex 32`).
+> Set `CALLAID_CORS_ORIGINS` (comma-separated) to your SPA origin(s) when the
+> frontend is served from a different host; unset means same-origin only.
+
 **Render:** a [`render.yaml`](./render.yaml) blueprint is included — point Render
 at this repo (New → Blueprint) for a one-click deploy with generated secrets and
 the `/api/health` health check.
 
-> Vercel's serverless model can't run the persistent process or the WebSocket and
-> has an ephemeral/read-only filesystem, so it is intentionally **not** a target.
+> **Vercel is a preview/demo target only — never production.** The `vercel.json` +
+> `api/index.js` here exist so a branch can spin up a throwaway preview, but
+> Vercel's serverless model cannot run the persistent process or the WebSocket and
+> has an ephemeral/read-only filesystem. On Vercel **every cold start reseeds a
+> fresh demo DB and all tenant writes are lost**, and the live HUD degrades to HTTP
+> polling. Use it to click through the UI, not to store real data. To serve the SPA
+> from Vercel's CDN in production, deploy the stateful backend (API + WS + DB) to a
+> container host and point the SPA at that origin via `CALLAID_CORS_ORIGINS`.
 
 ## Architecture
 

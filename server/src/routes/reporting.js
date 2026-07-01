@@ -15,30 +15,35 @@ function adminOnly(req, res, next) {
 
 const trend = (rep) => (rep.avg >= 78 ? 'up' : 'down');
 
+// Aggregate in SQL rather than pulling every row (incl. large transcript blobs)
+// into JS and reducing.
 function repStats(companyId, userId) {
-  const calls = db.prepare('SELECT * FROM calls WHERE company_id = ? AND user_id = ?').all(companyId, userId);
-  const count = calls.length;
-  const avg = count ? Math.round(calls.reduce((s, c) => s + (c.overall_score || 0), 0) / count) : 0;
-  return { count, avg };
+  const r = db.prepare('SELECT COUNT(*) c, AVG(overall_score) a FROM calls WHERE company_id = ? AND user_id = ?').get(companyId, userId);
+  return { count: r.c, avg: r.c ? Math.round(r.a) : 0 };
 }
 
 router.get('/reporting/team', adminOnly, (req, res) => {
-  const calls = db.prepare('SELECT * FROM calls WHERE company_id = ?').all(req.companyId);
-  const total = calls.length;
-  const avg = total ? Math.round(calls.reduce((s, c) => s + (c.overall_score || 0), 0) / total) : 0;
-  const sales = calls.filter(c => c.mode === 'sales');
-  const closeRate = sales.length ? Math.round(sales.filter(c => (c.overall_score || 0) >= 80).length / sales.length * 100) : 0;
-  const care = calls.filter(c => c.mode === 'care');
-  const csat = care.length ? +(care.reduce((s, c) => s + (c.overall_score || 0), 0) / care.length / 20).toFixed(1) : 0;
+  // One aggregate pass for the team stats instead of scanning all rows in JS.
+  const t = db.prepare(`SELECT
+      COUNT(*) total,
+      AVG(overall_score) avg,
+      SUM(CASE WHEN mode='sales' THEN 1 ELSE 0 END) sales_n,
+      SUM(CASE WHEN mode='sales' AND overall_score >= 80 THEN 1 ELSE 0 END) sales_closes,
+      AVG(CASE WHEN mode='care' THEN overall_score END) care_avg,
+      SUM(CASE WHEN mode='care' THEN 1 ELSE 0 END) care_n
+    FROM calls WHERE company_id = ?`).get(req.companyId);
+  const total = t.total;
+  const avg = total ? Math.round(t.avg) : 0;
+  const closeRate = t.sales_n ? Math.round((t.sales_closes / t.sales_n) * 100) : 0;
+  const csat = t.care_n ? +((t.care_avg) / 20).toFixed(1) : 0;
 
-  const reps = db.prepare(`SELECT id,name,role,default_mode FROM users WHERE company_id = ? AND role IN ('sales_rep','customer_service_rep') ORDER BY name`).all(req.companyId)
-    .map(u => {
-      const s = repStats(req.companyId, u.id);
-      return { id: u.id, name: u.name, role: u.role, mode: u.default_mode, calls: s.count, avg: s.avg };
-    })
-    .filter(r => r.calls > 0)
-    .sort((a, b) => b.avg - a.avg)
-    .map(r => ({ ...r, trend: trend(r) }));
+  // Leaderboard in a single grouped query (was N+1: one scan per rep).
+  const reps = db.prepare(`SELECT u.id, u.name, u.role, u.default_mode mode,
+      COUNT(c.id) calls, ROUND(AVG(c.overall_score)) avg
+    FROM users u JOIN calls c ON c.user_id = u.id AND c.company_id = u.company_id
+    WHERE u.company_id = ? AND u.role IN ('sales_rep','customer_service_rep')
+    GROUP BY u.id HAVING calls > 0 ORDER BY avg DESC`).all(req.companyId)
+    .map(r => ({ id: r.id, name: r.name, role: r.role, mode: r.mode, calls: r.calls, avg: r.avg, trend: trend(r) }));
 
   const saved = db.prepare(`SELECT c.id,c.contact_name,c.mode,c.call_type,c.duration,c.overall_score,u.name rep
     FROM calls c JOIN users u ON u.id = c.user_id WHERE c.company_id = ? ORDER BY c.started_at DESC LIMIT 8`).all(req.companyId);

@@ -47,6 +47,12 @@ export function setActiveCompany(id: string | null) {
 }
 export function getActiveCompany() { return _activeCompany; }
 
+// The AuthProvider registers a handler so a 401 anywhere (expired/rotated token)
+// clears the session and routes back to login, instead of leaving a page stuck on
+// a spinner. Login's own 401 (bad credentials) is excluded — see request().
+let _onUnauthorized: (() => void) | null = null;
+export function setUnauthorizedHandler(fn: (() => void) | null) { _onUnauthorized = fn; }
+
 async function request<T>(method: string, path: string, body?: unknown, isForm = false): Promise<T> {
   const headers: Record<string, string> = {};
   if (_token) headers['authorization'] = `Bearer ${_token}`;
@@ -59,7 +65,17 @@ async function request<T>(method: string, path: string, body?: unknown, isForm =
   const res = await fetch(`/api${path}`, { method, headers, body: payload });
   if (res.status === 204) return undefined as T;
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new ApiError((data as any)?.error || `http_${res.status}`, res.status);
+  if (!res.ok) {
+    // A 401 on an authenticated request means the session is gone — clear it and
+    // let the app route to login. Don't do this for the login call itself, where
+    // 401 just means wrong credentials.
+    if (res.status === 401 && path !== '/auth/login') {
+      setToken(null);
+      setActiveCompany(null);
+      _onUnauthorized?.();
+    }
+    throw new ApiError((data as any)?.error || `http_${res.status}`, res.status);
+  }
   return data as T;
 }
 

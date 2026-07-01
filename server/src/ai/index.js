@@ -44,7 +44,10 @@ export async function liveSuggest(companyId, ctx) {
       const r = await claude.suggest(key, full);
       return { engine: 'claude', ...r };
     } catch (e) {
-      // fall through to deterministic engine — never block the live HUD
+      // fall through to deterministic engine — never block the live HUD.
+      // Log so a persistently-failing Claude path (bad key, API change) is
+      // visible instead of silently degrading every tenant to the fallback.
+      console.error('[ai] liveSuggest claude failed, using fallback:', e?.message);
       return { engine: 'fallback', degraded: true, ...fallback.suggest(full) };
     }
   }
@@ -59,6 +62,7 @@ export async function analyzeCall(companyId, ctx) {
       const r = await claude.analyze(key, full);
       return { engine: 'claude', ...r };
     } catch (e) {
+      console.error('[ai] analyzeCall claude failed, using fallback:', e?.message);
       return { engine: 'fallback', degraded: true, ...fallback.analyze(full) };
     }
   }
@@ -69,7 +73,10 @@ export async function proposePlaybook(companyId, { filename, text }) {
   const key = tenantKey(companyId);
   if (key) {
     try { return await claude.propose(key, { companyName: companyName(companyId), filename, text }); }
-    catch { return fallback.propose({ filename, text }); }
+    catch (e) {
+      console.error('[ai] proposePlaybook claude failed, using fallback:', e?.message);
+      return fallback.propose({ filename, text });
+    }
   }
   return fallback.propose({ filename, text });
 }

@@ -3,7 +3,7 @@
 import { randomBytes } from 'node:crypto';
 import { db } from '../../db.js';
 import { json } from '../../util.js';
-import { GLOBAL_SANDBOX, authUrl, dcFromAccountsServer, DC } from './config.js';
+import { GLOBAL_SANDBOX, authUrl, dcFromAccountsServer, DC, isAllowedCrmDomain } from './config.js';
 import { getConfig, saveConfig, isConnected, remove, clearCachedToken } from './store.js';
 import { exchangeCode, revoke } from './oauth.js';
 import { fetchIdentities, fetchDeskOrg } from './adapters.js';
@@ -72,12 +72,18 @@ export async function handleCallback({ companyId, code, location, accountsServer
   const dc = location || dcFromAccountsServer(accountsServer || '');
   const accounts = accountsServer || DC[dc]?.accounts || DC.us.accounts;
   const tok = await exchangeCode({ code, accountsServer: accounts });
+  // Only trust api_domain if it's a known Zoho API host; otherwise fall back to
+  // the DC table. Prevents SSRF via a spoofed/malicious token response.
+  const crmDomain = isAllowedCrmDomain(tok.api_domain) ? tok.api_domain : DC[dc]?.crm;
+  if (tok.api_domain && crmDomain !== tok.api_domain) {
+    console.warn('[zoho] rejected untrusted api_domain from token response:', tok.api_domain);
+  }
   const cfg = {
     sandbox: false,
     refresh_token: tok.refresh_token,
     dc_location: dc,
     accounts_server: accounts,
-    crm_api_domain: tok.api_domain || DC[dc]?.crm,
+    crm_api_domain: crmDomain,
     desk_api_base: DC[dc]?.desk,
     products_enabled: ['crm', 'desk'],
   };

@@ -6,8 +6,8 @@ import jwt from 'jsonwebtoken';
 import bcrypt from 'bcryptjs';
 import { db } from './db.js';
 import { id, now } from './util.js';
+import { JWT_SECRET } from './secrets.js';
 
-const JWT_SECRET = process.env.CALLAID_JWT_SECRET || 'callaid-dev-jwt-secret';
 const TOKEN_TTL = '12h';
 
 export function hashPassword(pw) {
@@ -44,10 +44,19 @@ export function authRequired(req, res, next) {
     if (!user) return res.status(401).json({ error: 'invalid_user' });
     req.user = user;
     // The tenant the request operates on. Super admins may override via header to
-    // manage a specific tenant; that override is audit-logged at the route layer.
-    req.companyId = user.role === 'super_admin'
-      ? (req.headers['x-company-id'] || null)
-      : user.company_id;
+    // manage a specific tenant. That override must be validated (the target must
+    // exist) and every cross-tenant access is audit-logged, per spec §5.
+    if (user.role === 'super_admin') {
+      const override = req.headers['x-company-id'] || null;
+      if (override) {
+        const company = db.prepare('SELECT id FROM companies WHERE id = ?').get(override);
+        if (!company) return res.status(400).json({ error: 'unknown_company' });
+        audit(user.id, override, 'cross_tenant_access', `${req.method} ${req.path}`);
+      }
+      req.companyId = override;
+    } else {
+      req.companyId = user.company_id;
+    }
     next();
   } catch {
     return res.status(401).json({ error: 'invalid_token' });
